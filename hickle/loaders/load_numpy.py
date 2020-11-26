@@ -33,7 +33,7 @@ def create_np_scalar_dataset(py_obj, h_group, name, **kwargs):
 
     d = h_group.create_dataset(name, data=py_obj, **no_compression(kwargs))
 
-    d.attrs["np_dtype"] = py_obj.dtype.str.encode("ascii")
+    #d.attrs["np_dtype"] = py_obj.dtype.str.encode("ascii")
     return d,()
 
 
@@ -49,7 +49,7 @@ def create_np_dtype(py_obj, h_group, name, **kwargs):
     Returns:
         Dataset and empty list of subitems
     """
-    d = h_group.create_dataset(name, data=bytearray(py_obj.str,"ascii"), **kwargs)
+    d = h_group.create_dataset(name, shape=None,dtype = py_obj, **kwargs)
     return d,()
 
 
@@ -73,11 +73,13 @@ def create_np_array_dataset(py_obj, h_group, name, **kwargs):
     if "str" in dtype.name:
         if py_obj.ndim < 1:
             # convert string to utf8 encoded bytearray
-            h_node = h_group.create_dataset(name,data = bytearray(py_obj.tolist(),"utf8"),**kwargs)
+            byte_array = py_obj.tolist().encode("utf8")
+            h_node = h_group.create_dataset(name,data = np.array(byte_array,copy=False),**kwargs)
             sub_items = ()
         else:
             # store content as list of strings
             h_node,sub_items = create_listlike_dataset(py_obj.tolist(), h_group, name, **kwargs)
+        h_node.attrs['dt'] = dtype.str.encode('ascii')
     elif dtype.name == 'object':
         # If so, convert py_obj to list
         py_obj = py_obj.tolist()
@@ -90,10 +92,10 @@ def create_np_array_dataset(py_obj, h_group, name, **kwargs):
             # If not, create a new group and dump py_obj into that
             h_node = h_group.create_group(name)
             sub_items = ("data",py_obj,{},kwargs),
+        h_node.attrs['dt'] = dtype.str.encode('ascii')
     else:
         h_node = h_group.create_dataset(name, data=py_obj, **kwargs)
         sub_items = ()
-    h_node.attrs['np_dtype'] = dtype.str.encode('ascii')
     return h_node,sub_items
 
 def create_np_masked_array_dataset(py_obj, h_group, name, **kwargs):
@@ -113,7 +115,7 @@ def create_np_masked_array_dataset(py_obj, h_group, name, **kwargs):
     # Obtain dtype of py_obj
 
     h_node = h_group.create_group(name)
-    h_node.attrs['np_dtype'] = py_obj.dtype.str.encode('ascii')
+    h_node.attrs['dt'] = py_obj.dtype.str.encode('ascii')
     return h_node,(("data",py_obj.data,{},kwargs),('mask',py_obj.mask,{},kwargs))
 
 
@@ -121,7 +123,7 @@ def load_np_dtype_dataset(h_node,base_type,py_obj_type):
     """
     restores dtype from dataset
     """
-    return np.dtype(bytes(h_node[()]))
+    return np.dtype(h_node[()]) if h_node.shape is not None else h_node.dtype
 
 
 def load_np_scalar_dataset(h_node,base_type,py_obj_type):
@@ -129,7 +131,7 @@ def load_np_scalar_dataset(h_node,base_type,py_obj_type):
     restores scalar value from dataset
     """
 
-    dtype = np.dtype(h_node.attrs["np_dtype"].decode("ascii"))
+    dtype = h_node.dtype#np.dtype(h_node.attrs["np_dtype"].decode("ascii"))
     return dtype.type(h_node[()])
 
 
@@ -137,7 +139,18 @@ def load_ndarray_dataset(h_node,base_type,py_obj_type):
     """
     restores ndarray like object from dataset
     """
-    dtype = np.dtype(h_node.attrs['np_dtype'].decode('ascii'))
+    dtype = h_node.attrs.get('dt',None)
+    content = h_node[()]
+    if dtype is None:
+        dtype = h_node.attrs.get('np_dtype',None)
+        if dtype is None:
+            dtype = h_node.dtype
+        else:
+            dtype = np.dtype(dtype.decode('ascii'))
+    else:
+        dtype = np.dtype(dtype.decode('ascii'))
+    #dtype = np.dtype(h_node.attrs['np_dtype'].decode('ascii'))
+    #if dtype is Nonue
     if "str" in dtype.name and "bytes" not in h_node.dtype.name:
         return np.array(bytes(h_node[()]).decode("utf8"),dtype=dtype)
     if issubclass(py_obj_type,np.matrix):
@@ -176,13 +189,16 @@ class NDArrayLikeContainer(ListLikeContainer):
         # dumped using create_pickled_dataset or its name reads
         # data than assume single non listtype object otherwise
         # pass item on to append method of ListLikeContainer
-        if h5_attrs.get("base_type",'') == b'pickle' or name == "data":
+        if h5_attrs.get("base_type",b'pickle') == b'pickle' or name == "data":
             self._content = item
         else:
             super(NDArrayLikeContainer,self).append(name,item,h5_attrs)
     
     def convert(self):
-        data = np.array(self._content,dtype = self._h5_attrs['np_dtype'].decode('ascii'))
+        dtype = self._h5_attrs.get('dt',None)
+        if dtype is None:
+            dtype = self._h5_attrs.get('np_dtype')
+        data = np.array(self._content,dtype = dtype.decode('ascii'))
         return data if data.__class__ is self.object_type or isinstance(self.object_type,types.LambdaType) else self.object_type(data)
 
 class NDMaskedArrayContainer(PyContainer):
@@ -198,7 +214,10 @@ class NDMaskedArrayContainer(PyContainer):
         self._content[name] = item
 
     def convert(self):
-        dtype = self._h5_attrs['np_dtype'].decode('ascii')
+        dtype = self._h5_attrs.get('dt',None)
+        if dtype is None:
+            dtype = self._h5_attrs.get('np_dtype',None)
+        dtype = dtype.decode('ascii')
         data = np.ma.array(self._content['data'], mask=self._content['mask'], dtype=dtype)
         return data if data.__class__ is self.object_type or isinstance(self.object_type,types.LambdaType) else self.object_type(data)
 
@@ -209,11 +228,11 @@ class NDMaskedArrayContainer(PyContainer):
 # %% REGISTERS
 class_register = [
     [np.dtype, b"np_dtype", create_np_dtype, load_np_dtype_dataset],
-    [np.number, b"np_scalar", create_np_scalar_dataset, load_np_scalar_dataset],
+    [np.number, b"np_scalar", create_np_scalar_dataset, load_np_scalar_dataset,None,False],
 
     # for all scalars which are not derived from np.number which itself is np.generic subclass
     # to properly catch and handle they will be caught by the following
-    [np.generic, b"np_scalar", create_np_scalar_dataset, load_np_scalar_dataset],
+    [np.generic, b"np_scalar", create_np_scalar_dataset, load_np_scalar_dataset,None,False],
 
     [np.ndarray, b"ndarray", create_np_array_dataset, load_ndarray_dataset,NDArrayLikeContainer],
     [np.ma.core.MaskedArray, b"ndarray_masked", create_np_masked_array_dataset, None,NDMaskedArrayContainer],

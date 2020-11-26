@@ -46,15 +46,17 @@ import warnings
 import types
 import operator
 import functools as ft
+import itertools
 from importlib.util import find_spec, module_from_spec
 
 # Package imports
 import dill as pickle
 import copyreg
 import numpy as np
+import h5py as h5
 
 # hickle imports
-from .helpers import PyContainer,not_dumpable,nobody_is_my_name
+from .helpers import PyContainer,not_dumpable,nobody_is_my_name,NotHicklable,no_compression
 
 
 # %% GLOBALS
@@ -84,6 +86,31 @@ def dump_nothing(py_obj, h_group, name, **kwargs): # pragma: nocover
     """
     return nobody_is_my_name
 
+def _force_dump(memo,key,value): # pragma: nocover
+    pass
+
+# h5py < 2.10 ref_dtype has to be explicitly created by
+# call to special_dtype(ref=h5py.Reference) 
+# h5py >= 2.10 provides already a ref_dtype where metadata is already properly
+# set. Both ways to define dtype are equivalent
+h5_major,h5_minor,_ = [ int(v) for v in h5.__version__.split('.')]
+if h5_major > 2 or ( h5_major == 2 and h5_minor >= 10 ):
+    memo_link_dtype = h5.ref_dtype
+else:
+    memo_link_dtype = np.dtype('O',metadata={'ref':h5.Reference})
+
+def is_memo_link(dt):
+    """
+    checks whether dtype represence ref_dtype or not
+    is modeled along h5py.check_ref_dtype (h5py >= 2.10).
+    In constrast to the latter it just returns True if data type indicates
+    h5py.Reference object and false otherwise.
+    """
+    try:
+        return dt.metadata.get('ref',None) is h5.Reference
+    except AttributeError: # pragma: nocover
+        return False 
+
 # %% CLASS DEFINITIONS
 
 class _DictItem(): # pragma: nocover
@@ -97,6 +124,144 @@ class SerializedWarning(UserWarning): # pragma: nocover
     The data will be serialized using pickle.
     """
 
+class TypeMemoTables():
+    """
+    creates and maintains global type memoizatoin table listing 
+    pickle strings for all types required to properly restore the content of
+    the hickle file. The 'type' attribute of each data set and group contains
+    a h5py.Reference to the appropriate entry.
+    """
+    __slots__ = ( '_py_type_table','_obj_type_link','_base_type_link')
+
+    # list of the tables of all currently open hickle files
+    tables = dict()
+
+    def __init__(self,h_root_group):
+        """
+        create subgroup of root_group representing table of py_ob_type entries
+        if table already exists load existing entries
+
+        Parameters:
+        -----------
+            h_root_group (h5py.Group): root group to wich data is dumped
+        """
+        self._obj_type_link = dict()
+        self._base_type_link = dict()
+        self._py_type_table = h_root_group.get("py_obj_types_table",None)
+        if self._py_type_table is None:
+            self._py_type_table = h_root_group.create_group("py_obj_types_table",track_order = True)
+        else:
+            for index,entry in self._py_type_table.items():
+                content = entry[()]
+                if index[0] == 'b':
+                    content = bytes(content)
+                    base_link = self._base_type_link.get(content,None)
+                    if base_link is None:
+                        self._base_type_link[content] = entry
+                    continue
+                py_obj_type = pickle.loads(content)
+                self._obj_type_link[id(py_obj_type)] = entry
+        
+    def py_obj_type_ref(self,py_obj_type,base_type=None,**kwargs):
+        type_id = id(py_obj_type)
+        entry = self._obj_type_link.get(type_id,None)
+        if entry is not None:
+            return entry.ref
+        type_entry = bytearray(pickle.dumps(py_obj_type))
+        type_entry = np.array([type_entry],copy = False)
+        type_entry.dtype = '|S1'
+        entry_id = len(self._py_type_table)
+        entry = self._py_type_table.create_dataset(str(entry_id),data=type_entry,**kwargs)
+        if base_type is not None:
+            h_base =  self._base_type_link.get(base_type,None)
+            if h_base is None:
+                self._base_type_link[base_type] = h_base = self._py_type_table.create_dataset('b{}'.format(len(self._base_type_link)),data=np.array(base_type),**no_compression(kwargs))
+            entry.attrs['base'] = h_base.ref
+        self._obj_type_link[type_id] = entry
+        return entry.ref
+
+    @staticmethod
+    def create_table(h_root_group):
+        table = TypeMemoTables.tables.get(h_root_group.file.id,None)
+        if table is None:
+            table = TypeMemoTables.tables[h_root_group.file.id] = TypeMemoTables(h_root_group)
+        return table
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self,exc_type,exc_value,traceback):
+        if self._py_type_table is None:
+            return
+        TypeMemoTables.tables.pop(self._py_type_table.file.id,None)
+        self._py_type_table = None
+        self._obj_type_link = None
+
+class TypeLookupTables():
+    # TODO add base type link table
+    __slots__ = ('_py_obj_type_table','_py_obj_type_link','_pickle_loads')
+
+    tables = dict()
+    def __init__(self,obj_type_table,pickle_loads):
+        self._py_obj_type_table = obj_type_table
+        self._py_obj_type_link = dict()
+        self._pickle_loads = pickle_loads
+
+    def py_obj_type_from_ref(self,type_ref,h_attrs):
+        #type_ref = h_node.attrs.get('type',None)
+        if type_ref is None:
+            return object,b'pickle'
+        if not isinstance(type_ref,h5.Reference):
+            return self._pickle_loads(type_ref),h_attrs.get('base_type',b'pickle')
+        entry = self._py_obj_type_table.get(type_ref,None)
+        if entry is None:
+            raise ValueError("type_ref invalid reference")
+        type_info = self._py_obj_type_link.get(entry.id,None)
+        if type_info is None:
+            base_type = entry.attrs.get('base',None)
+            if base_type is None:
+                base_type = b'pickle'
+            else:
+                base_type = bytes(self._py_obj_type_table[base_type][()])
+            type_info = self._py_obj_type_link[entry.id] = (
+                self._pickle_loads(entry[()]),
+                base_type
+            )
+        return type_info
+                
+    @staticmethod
+    def load_table(h_root_group,pickle_loads):
+        table = TypeLookupTables.tables.get(h_root_group.file.id,None)
+        if table is not None:
+            return table
+        py_obj_type_table = h_root_group.get('py_obj_types_table',None)
+        if isinstance(py_obj_type_table,h5.Group):
+            table = TypeLookupTables.tables[h_root_group.file.id] = TypeLookupTables(py_obj_type_table,pickle_loads)
+        else:
+            table = TypeLookupTables.tables[h_root_group.file.id] = NoLookupTables(h_root_group,pickle_loads)
+        return table
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self,exc_type,exc_value,traceback):
+        if self._py_obj_type_table is None:
+            return
+        TypeLookupTables.tables.pop(self._py_obj_type_table.file.id,None)
+        self._py_obj_type_table = None
+        self._py_obj_type_link = None
+        
+class NoLookupTables(TypeLookupTables):
+    def __init__(self,h_root_group,pickle_loads):
+        super().__init__(h_root_group,pickle_loads)
+
+    def py_obj_type_from_ref(self,type_id,h_attrs):
+        try:
+            return self._pickle_loads(type_id),h_attrs.get('base_type',b'pickle')
+        except Exception as invalid:
+            raise ValueError("no type memo tables") from invalid
+
+
 #####################
 # loading optional  #
 #####################
@@ -104,7 +269,7 @@ class SerializedWarning(UserWarning): # pragma: nocover
 
 
 # This function registers a class to be used by hickle
-def register_class(myclass_type, hkl_str, dump_function=None, load_function=None, container_class=None):
+def register_class(myclass_type, hkl_str, dump_function=None, load_function=None, container_class=None,memoize = True):
     """ Register a new hickle class.
 
     Parameters:
@@ -159,7 +324,7 @@ def register_class(myclass_type, hkl_str, dump_function=None, load_function=None
             )
     # add loader
     if dump_function is not None:
-        types_dict[myclass_type] = (dump_function, hkl_str)
+        types_dict[myclass_type] = (dump_function, hkl_str, ( dict.__setitem__ if memoize else _force_dump ) )
     if load_function is not None:
         hkl_types_dict[hkl_str] = load_function
     if container_class is not None:
@@ -245,7 +410,7 @@ def load_loader(py_obj_type, type_mro = type.mro):
             # dummy objects are not dumpable ensure that future lookups return that result
             loader_item = types_dict.get(mro_item,None)
             if loader_item is None:
-                loader_item = types_dict[mro_item] = ( not_dumpable, b'NotHicklable' )
+                loader_item = types_dict[mro_item] = ( not_dumpable, b'NotHicklable',_force_dump )
             # ensure module of mro_item is loaded as loader as it will contain
             # loader which knows how to handle group or dataset with dummy as 
             # py_obj_type 
@@ -301,7 +466,7 @@ def load_loader(py_obj_type, type_mro = type.mro):
         # check next base class
 
     # no appropriate loader found return fallback to pickle
-    return py_obj_type,(create_pickled_dataset,b'pickle')
+    return py_obj_type,(create_pickled_dataset,b'pickle',dict.__setitem__)
 
 def type_legacy_mro(cls):
     """
@@ -351,7 +516,6 @@ class _DictItemContainer(PyContainer):
 
 register_class(_DictItem, b'dict_item',dump_nothing,load_nothing,_DictItemContainer)
 
-
 def create_pickled_dataset(py_obj, h_group, name, reason = None, **kwargs):
     """
     try to call __reduce_ex__ or __reduce__ on object if defined
@@ -367,77 +531,20 @@ def create_pickled_dataset(py_obj, h_group, name, reason = None, **kwargs):
         call_id (int): index to identify object's relative location in the
             iterable.
     """
-    # ensure that function, method and class objects are pickled in any case
-    # do not issue SerializedWarning for these types
-    if not isinstance(
-        py_obj,
-        (types.FunctionType, types.BuiltinFunctionType, types.MethodType, types.BuiltinMethodType,type)
-    ):
+    reason_str = " (Reason: %s)" % (reason) if reason is not None else ""
+    warnings.warn(
+        "{!r} type not understood, data is serialized:{:s}".format(
+            py_obj.__class__.__name__, reason_str
+        ),
+        SerializedWarning
+    )
         
-        # check if object can be reduced to somthing dumpable
-        # check if there is a method registered in copyreg.dispatch, or if
-        # the class object defines __reduce__ or __reduce_ex__ method.
-        extra_args = ()
-        reducer = copyreg.dispatch_table.get(py_obj.__class__,None)
-        if reducer is None:
-            reducer = getattr(py_obj.__class__,'__reduce_ex__',None)
-            if reducer is None:
-                reducer = getattr(py_obj.__class__,'__reduce__',None)
-            else:
-                extra_args = (pickle.DEFAULT_PROTOCOL,)
-        if reducer is not None:
-            reduced_obj = reducer(py_obj,*extra_args)
-            if len(reduced_obj) > 1:
-
-                # object could be successfully reduced. Create a dedicated
-                # object group. Prepare all items of the returned tuple which
-                # are not None to be dumped into this group. The first two items
-                # 'create' and 'args' are according to pickle documentation
-                # manadatory. The remaining ones 'state', 'set', 'list', 'keys' and
-                # 'values' are optional. They shall be ommited in case either not
-                # present or None. 
-                # 'create' ... the method to be called upon load to restore the object
-                # 'args' ..... the arguments to be passed to the 'create' method
-                # 'state' .... state value to be passed to __setstate__ or 'set' method
-                # 'set' ...... method to called instead of __setstate__ of object
-                # 'list' ..... tuple representing the items provided by list iterator
-                # 'keys' ..... tuple representing dict keys provided by dict iterator
-                # 'values' ... tuple representing dict values provided by dict iterator
-                object_group = h_group.create_group(name)
-                def object_items():
-                    yield ('create',reduced_obj[0],{},kwargs)
-                    yield ('args',reduced_obj[1],{},kwargs)
-                    None,None,None,None,None
-                    if len(reduced_obj) < 3:
-                        return
-                    if reduced_obj[2] is not None:
-                        yield ('state',reduced_obj[2],{},kwargs)
-                        if len(reduced_obj) > 5:
-                            yield ('set',reduced_obj[5],{},kwargs)
-                    if len(reduced_obj) < 4:
-                        return
-                    if reduced_obj[3] is not None:
-                        yield ('list',tuple(reduced_obj[3]),{},kwargs)
-                    if len(reduced_obj) < 5 or reduced_obj[4] is None:
-                        return
-                    keys,values = zip(*reduced_obj[4]) if operator.length_hint(py_obj) > 0 else ((),())
-                    yield ('keys',keys,{},kwargs)
-                    yield ('values',values,{},kwargs)
-                return object_group,object_items()
-
-        # for what ever reason py_obj could not be successfully reduced
-        # ask pickle for help and report to user.
-        reason_str = " (Reason: %s)" % (reason) if reason is not None else ""
-        warnings.warn(
-            "{!r} type not understood, data is serialized:{:s}".format(
-                py_obj.__class__.__name__, reason_str
-            ),
-            SerializedWarning
-        )
 
     # store object as pickle string
-    pickled_obj = pickle.dumps(py_obj)
-    d = h_group.create_dataset(name, data=bytearray(pickled_obj), **kwargs)
+    pickled_obj = bytearray(pickle.dumps(py_obj))
+    pickled_obj = np.array([pickled_obj],copy=False)
+    pickled_obj.dtype = 'S1'
+    d = h_group.create_dataset(name, data=pickled_obj, **kwargs)
     return d,() 
 
 def load_pickled_data(h_node, base_type, py_obj_type):
@@ -446,66 +553,117 @@ def load_pickled_data(h_node, base_type, py_obj_type):
     """
 
     return pickle.loads(h_node[()])
+        
+# no dump method is registered for object as this is the default for
+# any unknown object and for classes, functions and methods
+register_class(object,b'pickle',None,load_pickled_data)
 
-class PickledContainer(PyContainer):
+def create_compact_dataset(py_obj, h_group, name, **kwargs):
+    compact = getattr(py_obj,'__compact__',None)
+    table = TypeMemoTables.tables.get(h_group.file.id,None)
+    if compact is not None and table is not None:
+        compact_py_obj = compact()
+        if compact_py_obj is not None:
+            py_obj_type, (create_dataset, base_type, memoize) = load_loader(compact_py_obj.__class__)
+            try:
+                h_node,h_subitems = create_dataset(compact_py_obj, h_group, name, **kwargs)
+            except NotHicklable:
+                pass
+            else:
+                if create_dataset not in (create_pickled_dataset,):
+                    h_node.attrs['compact_type'] = table.py_obj_type_ref(py_obj_type,base_type,**kwargs)
+                return h_node,h_subitems
+    return create_pickled_dataset(py_obj)
+
+def load_compact_dataset(h_node,base_type,py_obj_type):
+    compact_type = h_node.attrs.get('compact_type',None)
+    if not isinstance(compact_type,h5.Reference):
+        return pickle.loads(h_node[()])
+    table = TypeLookupTables.tables.get(h_node.file.id,None)
+    if table is None:
+        return None
+    expanded_data = py_obj_type.__new__(py_obj_type)
+    py_obj_type,base_type = table.py_obj_type_from_ref(compact_type,h_node.attrs)
+    py_obj_type,(_,_,memoize) = load_loader(py_obj_type)
+    load_fn = hkl_types_dict.get(base_type,)
+    data = load_fn(h_node,base_type,py_obj_type)
+    expanded_data.__expand__(data)
+    return expanded_data
+
+
+class CompactContainer(PyContainer):
     """
     PyContainer handling restore of object from object group
     """
 
-    _notset = () 
+    __slots__ = ('_compact_container','append')
 
     def __init__(self,h5_attrs, base_type, object_type):
-        super(PickledContainer,self).__init__(h5_attrs,base_type,object_type,_content = dict())
+        super(CompactContainer,self).__init__(h5_attrs,base_type,object_type,_content = dict())
+        self._compact_container = None
+        self.append = self._append
 
-    def append(self,name,item,h5_attrs):
-        self._content[name] = item
+    def filter(self,items):
+        gettype,iterateall = itertools.tee(items,2)
+        itemiter = iter(gettype)
+        nextitem = next(itemiter,self)
+        if nextitem is self:
+            return
+        name,h_node = nextitem
+        compact_type = self._h5_attrs.get('compact_type',None)
+        table = TypeLookupTables.tables.get(h_node.file.id,None)
+        if table is None or not isinstance(compact_type,h5.Reference):
+            return
+        py_obj_type,base_type = table.py_obj_type_from_ref(compact_type,h_node.attrs)
+        py_obj_type,(_,_,memoize) = load_loader(py_obj_type)
+        py_container_class = hkl_container_dict.get(base_type,None)
+        if py_container_class is None:
+            raise RuntimeError("Cannot load container proxy for %s data type " % base_type)
+        self._compact_container = py_container_class(self._h5_attrs,base_type,py_obj_type)
+        self.append = self._compact_container.append
+        yield from self._compact_container.filter(iterateall)
+
+    def _append(self,name,item,h5_attrs):
+        raise Exception("not replaced by _compact_container.append")
 
     def convert(self):
+        expanded_object = self.object_type.__new__(self.object_type)
+        if not self._compact_container:
+            return expanded_object
+        compact_data = self._compact_container.convert()
+        expanded_object.__expand__(compact_data)
+        return expanded_object
 
-        # create the python object
-        py_obj = self._content['create'](*self._content['args'])
-        state = self._content.get('state',self._notset)
+# ensure files containing compacted dataset can be loaded even if 
+# compacting was not activated for the affected objects
+register_class(object,b'compact',None,load_compact_dataset,CompactContainer)
 
-        if state is not self._notset:
-            # restore its state
-            set_state = self._content.get('set',None)
-            if set_state is None:
-                set_state = getattr(py_obj.__class__,'__setstate__',None)
-            if set_state is None:
-                if isinstance(state,dict):
-                    object_dict = getattr(py_obj,'__dict__',None)
-                    if object_dict is not None:
-                        object_dict.update(state)
-            elif not isinstance(state,bool) or state:
-                set_state(py_obj,state)
-        list_iter = self._content.get('list',None)
-        if list_iter is not None:
-            # load any list values
-            if len(list_iter) < 2:
-                py_obj.append(list_iter[0])
-            else:
-                extend = getattr(py_obj,'extend',None)
-                if extend is not None:
-                    extend(list_iter)
-                else:
-                    for item in list_iter:
-                        py_obj.append(item)
+def enable_compact_expand(*args):
+    for py_obj_type in args:
+        if not isinstance(py_obj_type,type):
+            raise TypeError("'py_obj_type' must be class")
+        if not callable(getattr(py_obj_type,'__compact__')) or not callable(getattr(py_obj_type,'__expand__')):
+            raise TypeError("'{}' type object does not support hickl compact expand protocol".format(py_obj_type.__name__))
+        # register create_compact_dataset as dump funktion for py_obj_type
+        # registering load_compact_dataset and CompactContainer is not necessary as both 
+        # are provided by hickle in any case
+        register_class(py_obj_type,b'compact',create_compact_dataset,None,None)
 
-        # load any dict values
-        keys = self._content.get('keys',None)
-        if keys is None:
-            return py_obj
-        values = self._content.get('values',None)
-        if values is None:
-            return py_obj
-        for key,value in zip(keys,values):
-            py_obj[key] = value
-        return py_obj
-        
-# no dump method is registered for object as this is the default for
-# any unknown object and for classes, functions and methods
-register_class(object,b'pickle',None,load_pickled_data,PickledContainer)
-
+def disable_compact_expand(*args):
+    for py_obj_type in args:
+        if not isinstance(py_obj_type,type):
+            raise TypeError("'py_obj_type' must be class")
+        if not callable(getattr(py_obj_type,'__compact__')) or not callable(getattr(py_obj_type,'__expand__')):
+            raise TypeError("'{}' type object does not support hickl compact expand protocol".format(py_obj_type.__name__))
+        itementry = types_dict.get(py_obj_type,None)
+        if itementry is None or itementry[:2] != (create_compact_dataset,b'compact'):
+            # compacting for object not enabled
+            continue
+        types_dict.pop(py_obj_type)
+        # check whether a dedicated loader would exist for py_obj_type
+        # if reload it
+        load_loader(py_obj_type)
+    
 
 def _moc_numpy_array_object_lambda(x):
     """

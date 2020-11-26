@@ -107,7 +107,7 @@ def loader_table():
 
     # provide the table
     yield [
-        (int,b'int',create_test_dataset,load_test_dataset,None),
+        (int,b'int',create_test_dataset,load_test_dataset,None,False),
         (list,b'list',create_test_dataset,None,TestContainer),
         (tuple,b'tuple',None,load_test_dataset,TestContainer),
         (lookup._DictItem,b'dict_item',None,None,NotHicklePackage),
@@ -281,6 +281,9 @@ class NoExtendList(list):
 
 # %% FUNCTION DEFINITIONS
 
+def expect_entry(spec):
+    return (*spec[2:0:-1],(lookup._force_dump if len(spec) >= 6 and not spec[5] else dict.__setitem__))
+
 def function_to_dump(hallo,welt,with_default=1):
     """
     non class function to be dumpled and restored through
@@ -297,7 +300,7 @@ def test_register_class(loader_table):
     # and retrieve its contents from types_dict and hkl_types_dict
     loader_spec = loader_table[0]
     lookup.register_class(*loader_spec)
-    assert lookup.types_dict[loader_spec[0]] == loader_spec[2:0:-1]
+    assert lookup.types_dict[loader_spec[0]] == expect_entry(loader_spec)
     assert lookup.hkl_types_dict[loader_spec[1]] == loader_spec[3]
     with pytest.raises(KeyError):
         lookup.hkl_container_dict[loader_spec[1]] is None
@@ -306,7 +309,7 @@ def test_register_class(loader_table):
     # and retrive its contents from types_dict and hkl_contianer_dict
     loader_spec = loader_table[1]
     lookup.register_class(*loader_spec)
-    assert lookup.types_dict[loader_spec[0]] == loader_spec[2:0:-1]
+    assert lookup.types_dict[loader_spec[0]] == expect_entry(loader_spec)
     with pytest.raises(KeyError):
         lookup.hkl_types_dict[loader_spec[1]] is None
     assert lookup.hkl_container_dict[loader_spec[1]] == loader_spec[4]
@@ -388,7 +391,7 @@ def test_load_loader(loader_table,monkeypatch):
         moc_import_lib.setattr("hickle.lookup.find_spec",patch_importlib_util_find_no_spec)
         moc_import_lib.delitem(sys.modules,"hickle.loaders.load_builtins",raising=False)
         py_obj_type,nopickleloader = lookup.load_loader(py_object.__class__)
-        assert py_obj_type is dict and nopickleloader == (lookup.create_pickled_dataset,b'pickle')
+        assert py_obj_type is dict and nopickleloader == (lookup.create_pickled_dataset,b'pickle',dict.__setitem__)
 
         # redirect load_builtins loader to tests/hickle_loader path
         moc_import_lib.setattr("importlib.util.find_spec",patch_importlib_util_find_spec)
@@ -397,21 +400,21 @@ def test_load_loader(loader_table,monkeypatch):
         # preload dataset only loader and check that it can be resolved directly
         loader_spec = loader_table[0]
         lookup.register_class(*loader_spec)
-        assert lookup.load_loader((12).__class__) == (loader_spec[0],loader_spec[2:0:-1])
+        assert lookup.load_loader((12).__class__) == (loader_spec[0],expect_entry(loader_spec))
 
         # try to find appropriate loader for dict object, a moc of this
         # loader should be provided by hickle/tests/hickle_loaders/load_builtins
         # module ensure that this module is the one found by load_loader function
         import hickle.tests.hickle_loaders.load_builtins as load_builtins
         moc_import_lib.setitem(sys.modules,loader_name,load_builtins)
-        assert lookup.load_loader(py_object.__class__) == (dict,(load_builtins.create_package_test,b'dict'))
+        assert lookup.load_loader(py_object.__class__) == (dict,(load_builtins.create_package_test,b'dict',dict.__setitem__))
 
         # remove loader again and undo redirection again. dict should now be
         # processed by create_pickled_dataset
         moc_import_lib.delitem(sys.modules,loader_name)
         del lookup.types_dict[dict]
         py_obj_type,nopickleloader = lookup.load_loader(py_object.__class__)
-        assert py_obj_type is dict and nopickleloader == (lookup.create_pickled_dataset,b'pickle')
+        assert py_obj_type is dict and nopickleloader == (lookup.create_pickled_dataset,b'pickle',dict.__setitem__)
         
         # check that load_loader prevenst redefinition of loaders to be predefined by hickle core
         with pytest.raises(
@@ -430,22 +433,24 @@ def test_load_loader(loader_table,monkeypatch):
         ):
             py_obj_type,nopickleloader = lookup.load_loader(ToBeInLoadersOrNotToBe)
             assert py_obj_type is ToBeInLoadersOrNotToBe
-            assert nopickleloader == (lookup.create_pickled_dataset,b'pickle')
+            assert nopickleloader == (lookup.create_pickled_dataset,b'pickle',dict.__setitem__)
 
         # check that loader definitions for dummy objets defined by loaders work as expected
         # by loader module 
         monkeypatch.setattr(ToBeInLoadersOrNotToBe,'__module__',loader_name)
-        py_obj_type,(create_dataset,base_type) = lookup.load_loader(ToBeInLoadersOrNotToBe)
+        py_obj_type,(create_dataset,base_type,memoize) = lookup.load_loader(ToBeInLoadersOrNotToBe)
         assert py_obj_type is ToBeInLoadersOrNotToBe and base_type == b'NotHicklable'
         assert create_dataset is not_dumpable
+        assert memoize == lookup._force_dump
 
         # remove loader_name from list of loaded loaders and check that loader is loaded anew
         # and that values returned for dict object correspond to loader 
         # provided by freshly loaded loader module
         lookup.loaded_loaders.remove(loader_name)
-        py_obj_type,(create_dataset,base_type) = lookup.load_loader(py_object.__class__)
+        py_obj_type,(create_dataset,base_type,memoize) = lookup.load_loader(py_object.__class__)
         load_builtins_moc = sys.modules.get(loader_name,None)
         assert load_builtins_moc is not None
+        assert memoize == dict.__setitem__
         loader_spec = load_builtins_moc.class_register[0]
         assert py_obj_type is dict and create_dataset is loader_spec[2]
         assert base_type is loader_spec[1]
