@@ -24,7 +24,8 @@ hickle.tests.classes.Beat.Beat.set_annotation_manager(hickle.tests.classes.Annot
 
 import time
 import pickle
-filename = r"PanTomkins-incartdbI1120200819154408.537457.pkl"
+#filename = r"PanTomkins-incartdbI1120200819154408.537457.pkl"
+filename = r"*.pkl"
 datapath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dev_check')
 
 # the following is required as package name of with_state is hickle
@@ -38,52 +39,52 @@ pickle_loads = pickle.loads
 #dataset = np.load(os.path.join(datapath,filename),allow_pickle=True)
 def test_write_complex_hickle():
     import Beat, MorphometricPoint,AnnotationManager
-    testfile = glob.glob(os.path.join(datapath,filename))[0]
-    print(testfile)
-    fid = open(testfile,"rb")
-    starttime = time.perf_counter()
-    dataset = pickle.load(fid)
-    print("pickle.load lasted {} s".format(time.perf_counter() - starttime))
-    fid.close()
-    print(*dataset.keys())
-
-
-    starttime = time.perf_counter()
-    beats = dataset['beats']
-    print("load lasted {} s".format(time.perf_counter() - starttime))
-    dumpfile = os.path.join(datapath,filename.replace(".pkl","-hk.h5"))
-    print(dumpfile)
-    #beats = dataset['beats'] = beats[:50]
-    hkl.enable_compact_expand(Beat.Beat,MorphometricPoint.MorphPointList,AnnotationManager.AnnotationManager)
-    starttime = time.perf_counter()
-    hkl.dump(dataset,dumpfile,compression="gzip",shuffle=True)
-    print("hickle.dump (compact expand enabled) lasted {} s".format(time.perf_counter() - starttime))
-    starttime = time.perf_counter()
-    dataset2 = hkl.load(dumpfile)
-    print("hickle.load (compact expand enabled) lasted {} s".format(time.perf_counter() - starttime))
-    #print(*dataset2.keys())
-    starttime = time.perf_counter()
-    beats2 = dataset2['beats']
-    print("load lasted {} s".format(time.perf_counter() - starttime))
-    print(len(beats2),len(beats2) == len(beats))
-    #assert beats2 == dataset["beats"][0]
-    hkl.disable_compact_expand(Beat.Beat,MorphometricPoint.MorphPointList,AnnotationManager.AnnotationManager)
-    dumpfile = os.path.join(datapath,filename + ".h5")
-    starttime = time.perf_counter()
-    hkl.dump(dataset,dumpfile,compression="gzip",shuffle=True)
-    print("hickle.dump lasted {} s".format(time.perf_counter() - starttime))
-    starttime = time.perf_counter()
-    dataset2 = hkl.load(dumpfile)
-    print("hickle.load lasted {} s".format(time.perf_counter() - starttime))
-    #print(*dataset2.keys())
-    starttime = time.perf_counter()
-    beats2 = dataset2['beats']
-    print("load lasted {} s".format(time.perf_counter() - starttime))
-    print(len(beats2),len(beats2) == len(beats))
-    #assert beats2 == dataset["beats"][0]
+    for testfile in glob.glob(os.path.join(datapath,filename)):
+        print(testfile)
+        fid = open(testfile,"rb")
+        starttime = time.perf_counter()
+        dataset = pickle.load(fid)
+        print("pickle.load lasted {} s".format(time.perf_counter() - starttime))
+        fid.close()
+        print(*dataset.keys())
     
-
-    #dataset.close()
+    
+        starttime = time.perf_counter()
+        beats = dataset['beats']
+        print("load lasted {} s".format(time.perf_counter() - starttime))
+        dumpfile = testfile.replace(".pkl","-hk.h5")
+        print(dumpfile)
+        #beats = dataset['beats'] = beats[:50]
+        hkl.enable_compact_expand(Beat.Beat,MorphometricPoint.MorphPointList,AnnotationManager.AnnotationManager)
+        starttime = time.perf_counter()
+        hkl.dump(dataset,dumpfile,compression="gzip",shuffle=True)
+        print("hickle.dump (compact expand enabled) lasted {} s".format(time.perf_counter() - starttime))
+        starttime = time.perf_counter()
+        dataset2 = hkl.load(dumpfile)
+        print("hickle.load (compact expand enabled) lasted {} s".format(time.perf_counter() - starttime))
+        #print(*dataset2.keys())
+        starttime = time.perf_counter()
+        beats2 = dataset2['beats']
+        print("load lasted {} s".format(time.perf_counter() - starttime))
+        print(len(beats2),len(beats2) == len(beats))
+        #assert beats2 == dataset["beats"][0]
+        hkl.disable_compact_expand(Beat.Beat,MorphometricPoint.MorphPointList,AnnotationManager.AnnotationManager)
+        dumpfile =  testfile + ".h5"
+        starttime = time.perf_counter()
+        hkl.dump(dataset,dumpfile,compression="gzip",shuffle=True)
+        print("hickle.dump lasted {} s".format(time.perf_counter() - starttime))
+        starttime = time.perf_counter()
+        dataset2 = hkl.load(dumpfile)
+        print("hickle.load lasted {} s".format(time.perf_counter() - starttime))
+        #print(*dataset2.keys())
+        starttime = time.perf_counter()
+        beats2 = dataset2['beats']
+        print("load lasted {} s".format(time.perf_counter() - starttime))
+        print(len(beats2),len(beats2) == len(beats))
+        #assert beats2 == dataset["beats"][0]
+        
+    
+        #dataset.close()
 
 if __name__ == '__main__':
     test_write_complex_hickle()

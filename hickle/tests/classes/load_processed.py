@@ -9,7 +9,10 @@ import pickle
 
 Beat.Beat.set_annotation_manager(AnnotationManager.AnnotationManager)
 
-filename = "PanTomkins-incartdbI1120200819154408.537457.h5"
+#filename = "PanTomkins-incartdbI1120200819154408.537457.h5"
+#filename = "PanTomkins-incartdbI0120201104170545.097297.h5"
+#filename = "PanTomkins-incartdbI1720201104213032.408468.h5"
+filename = "PanTomkins-incartdbI7520201106160606.618832.h5"
 datapath = "../dev_check"
 #dataset = np.load(os.path.join(datapath,filename),allow_pickle=True)
 starttime = time.perf_counter()

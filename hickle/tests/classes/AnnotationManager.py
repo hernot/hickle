@@ -75,6 +75,12 @@ class AnnotationManager():
     def __str__(self):
         return str(self.__dict__)
 
+    def __getstate__(self):
+        return dict(self.__dict__)
+
+    def __setstate__(self,state):
+        self.__dict__.update(state)
+
     def __compact__(self):
         try:
             if (
@@ -199,9 +205,13 @@ class AnnotationManager():
             for item in (self.PeakRatio,self.R_low_rates,self.R_rate_ratio):
                 if not isinstance(item,(list,tuple)):
                     if ratesbase is None:
-                        if item.base is not None:
-                            ratesbase = item.base
-                            continue
+                        try:
+                            if item.base is not None:
+                                ratesbase = item.base
+                                continue
+                        except AttributeError:
+                            if np.isscalar(self.PeakRatio):
+                                self.PeakRatio = [self.PeakRatio,-1.0]
                     elif ratesbase is item.base:
                         continue
                 rates = np.array(
@@ -209,7 +219,8 @@ class AnnotationManager():
                         [*self.PeakRatio,0],
                         [self.R_pre_rate,self.R_peak_rate,self.R_post_rate],
                         self.R_low_rates,
-                        self.R_rate_ratio
+                        self.R_rate_ratio,
+                        *( minrates for minrates in ([self.get('R_min_rate',-1),self.get('R_min_outer_rate',-1),self.get('R_avrate',-1)],) if minrates >= [0,0,0])
                     ],
                     dtype = np.float32
                 )
@@ -217,6 +228,9 @@ class AnnotationManager():
             if rates is None:
                 rates = ratesbase
                 rates[1,:] = self.R_pre_rate,self.R_peak_rate,self.R_post_rate
+                minrates = [self.get('R_min_rate',-1),self.get('R_min_outer_rate',-1),self.get('R_avrate',-1)]
+                if minrates >= [0,0,0]:
+                    rates[4,:] = minrates
             t_area = self.get('T-Area',None)
             t_baseline = self.get('T-Baseline',None)
             if t_area is not None and t_baseline is not None:
@@ -278,7 +292,8 @@ class AnnotationManager():
                 AtrialFlutter = flutterpeaks,
                 ST_Segments = self.get('ST-Segments',None),
                 QRS_pt_peak = self.QRS_pt_peak,
-                Traces = np.array(self.traces,dtype = np.int8 )
+                Traces = np.array(self.traces,dtype = np.int8 ),
+                cut_bracket = self.get('cut_bracket',None)
             )
         except:
             raise
@@ -364,6 +379,8 @@ class AnnotationManager():
         self.R_pre_rate,self.R_peak_rate,self.R_post_rate = rates[1,:]
         self.R_low_rates = rates[2,:]
         self.R_rate_ratio = rates[3,:]
+        if rates.shape[0] > 4:
+            self.R_min_rate,self.R_min_outer_rate,self.R_avrate = rates[4,:]
         wave_flags = compact['WaveFlags']
         wave_area_and_base = compact['WaveAreasAndBases']
         flutterpeaks = compact['AtrialFlutter']
@@ -408,4 +425,7 @@ class AnnotationManager():
             self['ST-Segments'] = st_segments
         self.QRS_pt_peak = compact['QRS_pt_peak']
         self.traces = compact['Traces'].tolist()
+        cut_bracket = compact.get('cut_bracket',None)
+        if cut_bracket is not None:
+            self.cut_bracket = cut_bracket
     
