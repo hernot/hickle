@@ -1,0 +1,135 @@
+Beat Objects are structured as follows:
+
+  PWave: Wave object describing P-Wave or None
+  QRS: Wave object decribing QRS
+  TWave: Wave object describing T-Wave
+  Tail: list of addtional wave objects
+  Annotation: dictionary containing all so far seemingly valuable information
+    collected during beat segmentation and peak detection
+  Class: currently rather sloppy used set of flags suggesting type of beat
+  MaxVal: maxmimum Value in average scale 5 highpass filtered signal
+  MinVal: minimum Value in average scale 5 high pass filtered signal
+   
+Wave Object are structured as follows (all samples in 256/257 regime unless rescaled or resampled):
+  Start: the sample at which the wave starts
+  Peak: the sample at which in average over all channels the central peak occurs
+  Stop: the sample at which the wave ends
+
+Annotation dictionary contains the following data
+  PeakRatio: rough estimate by PanTomkins algorithm in how rapidly curvature of central peak
+     between last 6 Beats and current beat changed or 1 if insignificant
+  Q_onset_mml: numpy array describing mml marking onset of Q-Peak
+  Q_peak_mml: numpy array describing mml marking Q-Peak
+  R_pre_mml: numpy array describing mml marking pre R peak mml
+  R_peak_mml: numpy array describing mml marking R peak
+  R_post_mml: numpy array describing mml marking post R peak mml
+  S_peak_mml: numpy array describing mml marking S-Peak
+  S_offset_mml: numpy array describing mml marking S-Peak offset
+  R_pre_rate: mml rate (see Thurner 2019 for details) observed on pre R peak
+  R_peak_rate: mml rate (see Thurner 2019 for details) observed on R peak
+  R_post_rate: mml rate (see Thurner 2019 for details) observed on post R peak
+  QR_tail: list describing quadratic function used to identify p wave peaks which are close to QRS
+  RS_tail: list describing quadratic function used to identify post R peaks which are close to QRS
+  Extra-R-mml: list of numpy arrays describing addtional pre (index 0) and post (index 1)
+     R peak mml (see Thurner 2019 for what mml are)
+	NOTE: on some older datasets i is likely that falsly extra pre mml are assinged to the tail of
+    extra post mml (second entry in tuple). Must be shifted forward. On later and newer data sets
+    this error is fixed
+  R_low_rates: rates over scales 1, 2, 3 only correspoinding to R_pre_rate, R_peak_rate and R_post_rate
+  R_rate_Ration: ratio between R_low_rates cand corresponding R_pre_rate, R_peak_rate and R_post_rate
+  QRS_pt_peak: sample and postion of maximum peak in PanTomkins integrator signal
+  P_Wave_Parameters: area, average baseline, num peaks
+  Wave_max: numpy array describing maximum wavelet signal values over all 5 wavelet scales for just
+    current peak, current + previous peak and current + 2 previous peaks
+  Wave_min: numpy array describing minimum wavelet signal values over all 5 wavelet scales for just
+    current peak, current + previous peak and current + 2 previous peaks
+  Means: numpy array describing average values for wavelet values over all 5 wavelet scales for just
+    current peak, current + previous peak and current + 2 previous peaks
+  Atrial_flutter: Dictionary describing addtional atrial flutter waves
+  QRS_Morphometry: list of all Morphometric points between start and end of QRS over all 5 scales
+  T_Kind: type of T-Wave
+      3 ... biphasic wave with 3 peaks, 2 ... normal wave with 2 peaks, 1 ... ascending wave 1 peak
+  T_Area: total area under the curve of T-Wave peaks
+  T_Baseline: average baseline wavelet value over all peaks
+
+
+MorphPoint:
+  sample: sample at which point was recorded
+  value: high pass filtered signal value at specified sample
+  wavelet: wavelet signal value at specified sample
+  gradiend: wavelet gradined signal at specified sample
+  curvature: wavelet curvature signal at specified sample
+  kind: flag set indicating whether point represents maximum or minimum of signal, wavelet, gradiend and/or curvature
+
+Q_onset_mml, S_offset_mml: rows represent all 5 scales, column 0 is index into QRS_Morphometry list for wavelet and column 1
+   is sample at which onset or offset occurs
+
+Q_peak_mml, S_peak_mml:
+  rows represent all 5 scales, column 0 is index into QRS_Morphometry list for wavelet, column 1 is sample at which peak is
+  located and column 2 is curvature value at specified sample
+
+R_pre_mml, R_post_mml and all extra_R_mml:
+  rows represent all 5 scales (sixth row if present no meaning), column 0 is index into QRS_morphometry list for wavelet, column 1
+  sample at which mml passes through, column 2 achieved measurevalue (see Thurner 2019), wavelet value at sample
+R_peak_mml:
+  rows represent all 5 scales (sixth row if present no meaning), column 0 is index into QRS_morphometry list for wavelet, column 1
+  sample at which mml passes through, column 2 achieved measurevalue (see Thurner 2019), curvature value at sample
+QR_tail,RS_tail:
+  item 1 sample at which tail starts or ends, item 1 factor a for qadratic function (Thurner 2019),
+  item 2 factor b for qadratic function (Thurner 2019)
+
+P_Wave_Parameters, and flutter wave parameters,U-Wave (all 3 can be None if not present):
+   Kind: same as T_Kind
+   Area: same as T_Area
+   Baseline: same as T_Baseline
+   Artefact: Flag indicating if wave is likely strong artefact with average area under the curve exceeding 25% of
+     estimated average area under the curve of pre and post R peak
+   Split-T: only U-Wave indicates wether U-Wave likely is tail part of T-Wave and not distinct U-Wave
+
+
+
+*.npz file structure
+====================
+databasename:
+   String der den datenbank namen angibt: zB. incartdb
+
+recordname:
+   String der den record angibt: zB. I01
+
+beats:
+   Liste aller identifizierter Herzschläge (Details siehe vorstehend). Letzter Eintrag ist liste aller
+   QRS Complexe die Verworfen wurden. Enthält dictionaries die nur ein subset der oben beschriebenen Parameter
+   enthalten. Primär gedacht für die Entwicklung einer verbesseten Unterscheidung zwischen QRS und Artefakten
+
+
+result, wavelets:
+   Wavelet signale über alle 5 Skalen siehe Thurner 2019 und
+   Hochpassgefilterete über alle kanäle.
+   numpy array:
+      Dimension 1: 
+         Kanal 0 - 11 EKG Kanäle, hochpass gefiltert
+         Kanal 12 gemitteltes signal aller Hochpassgefilterten Signale
+         Kanal 13 gemittelte Wavelet signale
+      Dimension 2:
+         sample Werte über alle Kanäle uns Skalen
+      Dimension 3:
+         Skala 5 - 1 (0 - 4)
+
+data:
+   Rohdaten aus Datenbank über alle Kanäle
+
+datascaling:
+   skalierfaktor der auf die rohdaten angewandt wurde um auf uV um zu rechnenen
+
+channels:
+   indices der Kanaäle die benutzt wurden um die Wavelets zu berechnen und die Informationen über jeden
+   einzelnen Herzschlag zu extrahieren
+
+sf = rec.SamplingFrequency,
+   Abtastfrequenz des Datensatzes
+
+
+pantomkinsvalues
+	Pan-Tomkins Integrations Signal der Skala 4: Wavelet 4 entspricht ziemlich genau dem Gradienden
+    signal das Pan-Tomkins berechnen.
+
