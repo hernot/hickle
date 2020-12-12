@@ -140,8 +140,8 @@ def test_state_obj(monkeypatch,test_file_name):
         monkey.setattr(pickle,'dumps',make_visible_to_dumps)
         mode = 'w'
         obj = with_state()
-        #with pytest.warns(SerializedWarning):
-        dump(obj, test_file_name, mode)
+        with pytest.warns(SerializedWarning):
+            dump(obj, test_file_name, mode)
         monkey.setattr(pickle,'loads',hide_from_hickle)
         obj_hkl = load(test_file_name)
         assert isinstance(obj,obj_hkl.__class__) or isinstance(obj_hkl,obj.__class__)
@@ -154,7 +154,8 @@ def test_local_func(test_file_name):
     https://github.com/telegraphic/hickle/issues/119"""
 
     mode =  'w'
-    dump(func, test_file_name, mode)
+    with pytest.warns(lookup.SerializedWarning):
+        dump(func, test_file_name, mode)
     func_hkl = load(test_file_name)
     assert isinstance(func,func_hkl.__class__) or isinstance(func_hkl,func.__class__)
     assert func(1, 2) == func_hkl(1, 2)

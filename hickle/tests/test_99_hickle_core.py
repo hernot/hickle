@@ -155,7 +155,8 @@ def test_recursive_dump(h5_data):
     def fail_create_dict(py_obj,h_group,name,**kwargs):
         raise helpers.NotHicklable("test loader shrugg")
     lookup.types_dict[dict] = fail_create_dict,*backup_dict_loader[1:]
-    hickle._dump(data, h5_data, "pickled_dict",memo = memo,type_memo = type_memo)
+    with pytest.warns(lookup.SerializedWarning):
+        hickle._dump(data, h5_data, "pickled_dict",memo = memo,type_memo = type_memo)
     dumped_data = h5_data["pickled_dict"]
     lookup.types_dict[dict] = backup_dict_loader
     memo[id(data)] = back_up_memo_entry
