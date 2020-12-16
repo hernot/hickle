@@ -100,44 +100,75 @@ def file_opener(f, path, mode='r'):
 
     """
 
-    # Assume that we will have to close the file after dump or load
-    close_flag = True
-
     # Make sure that the given path always starts with '/'
     if not path.startswith('/'):
         path = "/%s" % path
 
     # Were we handed a file object or just a file name string?
-    if isinstance(f, (io.TextIOWrapper, io.BufferedWriter)):
-        filename, mode = f.name, f.mode
-        f.close()
-        mode = mode.replace('b', '')
-        h5f = h5.File(filename, mode)
-    elif isinstance(f, (str, Path)):
-        filename = f
-        h5f = h5.File(filename, mode)
-    elif isinstance(f, h5.Group):
-        try:
-            filename = f.file.filename
-        except ValueError:
+    if isinstance(f, (str, Path)):
+        strip = len(mode)-1 if mode[-1] == 'b' else len(mode)
+        return h5.File(f, mode[:strip]),path,True
+    if isinstance(f, h5.Group):
+        if not isinstance(f,h5.File):
+            f = f.file
+        if not f:
             raise ClosedFileError("HDF5 file has been closed. Please pass "
-                                  "either a filename string, a file object, or"
+                                  "either a filename string, a file like object, or"
                                   "an open HDF5-file")
-        path = ''.join([f.name, path])
-        h5f = f.file
-
-        if path.endswith('/'):
-            path = path[:-1]
+        #path = ''.join([f.name, path])
+        #h5f = f.file
+        #
+        #if path.endswith('/'):
+        #    path = path[:-1]
 
         # Since this file was already open, do not close the file afterward
-        close_flag = False
+        return f,''.join((f.name,path.strip('/'))),False
 
-    else:
-        print(f.__class__)
-        raise FileError("Cannot open file. Please pass either a filename "
-                        "string, a file object, or a h5py.File")
+    def not_io_base_like(*args):
+        def must_test():
+            if not args: # pragma: nocover
+                return False
+            cmd = getattr(f,args[0],None)
+            if not cmd:
+                return False
+            try:
+                cmd(*args[1:2])
+            except:
+                return False
+            if len(args) < 3:
+                return True
+            cmd = getattr(f,args[2],None)
+            if not cmd:
+                return False
+            try:
+                cmd(*args[3:4])
+            except:
+                return False
+            return True
+        return must_test
 
-    return h5f, path, close_flag
+    if (
+        getattr(f,'readable',not_io_base_like('read',0))() and
+        getattr(f,'seekable',not_io_base_like('seek',0,'tell'))()
+    ):
+
+        if ( len(mode) > 1 and mode[1] == '+' or mode[0] in 'awx' ):
+            if not getattr(f,'writeable',not_io_base_like('write',b''))():
+                raise FileError("Cannot open file. Please pass either a filename "
+                                "string, a file like object, or a h5py.File")
+        if ( mode[0] != 'r' ):
+            if mode[0] not in 'xwa':
+                raise FileError("invalid file mode must be one of 'w','w+','x','x+','r','r+','a'. A trailing 'b' ignored")
+            strip = 1
+        elif mode[-1] == 'b':
+            strip = len(mode) - 1
+        else:
+            strip = len(mode)
+        return h5.File(f, mode[:strip],driver='fileobj',fileobj = f),path,True
+        
+    #print(f.__class__)
+    raise FileError("Cannot open file. Please pass either a filename "
+                    "string, a file like object, or a h5py.File")
 
 
 ###########

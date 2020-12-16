@@ -61,36 +61,44 @@ def test_file_opener(h5_data,test_file_name):
 
     # check that file like object is properly initialized for writing
     filename = test_file_name.replace(".hkl","_{}.{}")
-    with open(filename.format("w",".hdf5"),"w") as f:
+    with open(filename.format("w",".hdf5"),"w+b") as f:
         h5_file,path,close_flag = hickle.file_opener(f,"root","w")
         assert isinstance(h5_file,h5py.File) and path == "/root" and h5_file.mode == 'r+'
         h5_file.close()
 
     # check that file like object is properly initialized for reading
-    with open(filename.format("w",".hdf5"),"r") as f:
-        h5_file,path,close_flag = hickle.file_opener(f,"root","r")
+    with open(filename.format("w",".hdf5"),"rb") as f:
+        h5_file,path,close_flag = hickle.file_opener(f,"root","rb")
         assert isinstance(h5_file,h5py.File) and path == "/root" and h5_file.mode == 'r'
         h5_file.close()
 
     # check that h5py.File object is properly intialized for writing
-    h5_file,path,close_flag = hickle.file_opener(h5_data,"","w")
+    h5_file,path,close_flag = hickle.file_opener(h5_data,"root_group","w")
     assert isinstance(h5_file,h5py.File) and path == "/root_group"
     assert h5_file.mode == 'r+' and not close_flag
+
+    
 
     # check that a new file is created for provided filename and properly intialized
     h5_file,path,close_flag = hickle.file_opener(filename.format("w",".hkl"),"root_group","w")
     assert isinstance(h5_file,h5py.File) and path == "/root_group"
     assert h5_file.mode == 'r+' and close_flag
     h5_file.close()
+
+    with pytest.raises(hickle.ClosedFileError):
+        h5_file,path,close_flag = hickle.file_opener(h5_file,path,"w")
+    
     
     # check that any other object not beein a file like object, a h5py.File object or
     # a filename string triggers an  FileError exception
     with pytest.raises(
         hickle.FileError,
         match = r"Cannot\s+open\s+file.\s+Please\s+pass\s+either\s+a\s+"
-                r"filename\s+string,\s+a\s+file\s+object,\s+or\s+a\s+h5py.File"
+                r"filename\s+string,\s+a\s+file\s+like\s+object,\s+or\s+a\s+h5py.File"
     ):
         h5_file,path,close_flag = hickle.file_opener(dict(),"root_group","w")
+
+    
         
 def test_recursive_dump(h5_data):
     """
